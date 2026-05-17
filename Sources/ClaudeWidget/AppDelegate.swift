@@ -11,12 +11,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             backing: .buffered,
             defer: false
         )
-        panel.level = .floating
+        // Sit at the desktop layer — regular app windows appear on top, like the calendar widget
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 2)
         panel.backgroundColor = .clear
         panel.isOpaque = false
         panel.hasShadow = true
         panel.isMovableByWindowBackground = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary]
+        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
 
         if let saved = UserDefaults.standard.string(forKey: "widgetFrame") {
             let frame = NSRectFromString(saved)
