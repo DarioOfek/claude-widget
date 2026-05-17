@@ -5,6 +5,13 @@ import SwiftUI
 class DesktopWindow: NSWindow {
     override var canBecomeKey: Bool  { false }
     override var canBecomeMain: Bool { false }
+
+    // NSVisualEffectView(.hudWindow) automatically raises level to .floating (3).
+    // Override the setter to pin the level below all normal windows.
+    override var level: NSWindow.Level {
+        get { super.level }
+        set { super.level = NSWindow.Level(rawValue: -1) }
+    }
 }
 
 class AppDelegate: NSObject, NSApplicationDelegate {
@@ -20,7 +27,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         // Sit at the desktop layer — every regular app window appears in front,
         // just like the macOS calendar widget.
-        win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 2)
+        win.level = NSWindow.Level(rawValue: -1)  // setter enforces this regardless of NSVisualEffectView
         win.backgroundColor = .clear
         win.isOpaque = false
         win.hasShadow = true

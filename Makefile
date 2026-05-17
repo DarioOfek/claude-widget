@@ -20,6 +20,7 @@ run: bundle
 	open $(BUNDLE)
 
 install: bundle
+	rm -rf /Applications/$(BUNDLE)
 	cp -R $(BUNDLE) /Applications/$(BUNDLE)
 	@echo "Installed to /Applications/$(BUNDLE)"
 
