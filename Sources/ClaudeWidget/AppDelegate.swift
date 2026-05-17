@@ -1,59 +1,67 @@
 import AppKit
 import SwiftUI
 
+// Plain NSWindow that never becomes key/main, so it never pops above other windows.
+class DesktopWindow: NSWindow {
+    override var canBecomeKey: Bool  { false }
+    override var canBecomeMain: Bool { false }
+}
+
 class AppDelegate: NSObject, NSApplicationDelegate {
-    var panel: NSPanel?
+    var window: DesktopWindow?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let panel = NSPanel(
+        let win = DesktopWindow(
             contentRect: NSRect(x: 0, y: 0, width: 260, height: 320),
-            styleMask: [.nonactivatingPanel, .fullSizeContentView, .borderless],
+            styleMask: [.borderless, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        // Sit at the desktop layer — regular app windows appear on top, like the calendar widget
-        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 2)
-        panel.backgroundColor = .clear
-        panel.isOpaque = false
-        panel.hasShadow = true
-        panel.isMovableByWindowBackground = true
-        panel.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
+
+        // Sit at the desktop layer — every regular app window appears in front,
+        // just like the macOS calendar widget.
+        win.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.desktopWindow)) + 2)
+        win.backgroundColor = .clear
+        win.isOpaque = false
+        win.hasShadow = true
+        win.isMovableByWindowBackground = true
+        win.collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle]
 
         if let saved = UserDefaults.standard.string(forKey: "widgetFrame") {
             let frame = NSRectFromString(saved)
             if frame != .zero {
-                panel.setFrame(frame, display: false)
+                win.setFrame(frame, display: false)
             } else {
-                positionDefault(panel)
+                positionDefault(win)
             }
         } else {
-            positionDefault(panel)
+            positionDefault(win)
         }
 
         let hosting = NSHostingView(rootView: ContentView())
         hosting.wantsLayer = true
         hosting.layer?.cornerRadius = 20
         hosting.layer?.masksToBounds = true
-        panel.contentView = hosting
-        panel.orderFront(nil)
-        self.panel = panel
+        win.contentView = hosting
+        win.orderFront(nil)
+        self.window = win
 
         NotificationCenter.default.addObserver(
             self,
             selector: #selector(savePosition),
             name: NSWindow.didMoveNotification,
-            object: panel
+            object: win
         )
     }
 
-    private func positionDefault(_ panel: NSPanel) {
+    private func positionDefault(_ win: NSWindow) {
         guard let screen = NSScreen.main else { return }
         let sf = screen.visibleFrame
-        panel.setFrameTopLeftPoint(NSPoint(x: sf.maxX - 275, y: sf.maxY))
+        win.setFrameTopLeftPoint(NSPoint(x: sf.maxX - 275, y: sf.maxY))
     }
 
     @objc private func savePosition() {
-        guard let panel else { return }
-        UserDefaults.standard.set(NSStringFromRect(panel.frame), forKey: "widgetFrame")
+        guard let window else { return }
+        UserDefaults.standard.set(NSStringFromRect(window.frame), forKey: "widgetFrame")
     }
 }
