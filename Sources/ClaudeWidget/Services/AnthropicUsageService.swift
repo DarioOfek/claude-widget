@@ -10,29 +10,33 @@ struct TurnUsage {
 }
 
 struct RollingUsage {
-    var turns: Int = 0
-    var limit: Int
-    var pct: Double  { limit > 0 ? min(1.0, Double(turns) / Double(limit)) : 0 }
-    var remaining: Int { max(0, limit - turns) }
+    var used: Double = 0      // cost-weighted usage ($, estimated)
+    var limit: Double         // plan budget ($, estimated)
+    var turns: Int = 0        // raw prompt count (shown as context only)
+    var pct: Double  { limit > 0 ? min(1.0, used / limit) : 0 }
+    var remaining: Double { max(0, limit - used) }
 }
 
 @MainActor
 class AnthropicUsageService: ObservableObject {
     @Published var today    = TurnUsage()
     @Published var month    = TurnUsage()
-    @Published var fiveHour = RollingUsage(limit: 225)
-    @Published var weekly   = RollingUsage(limit: 2450)
+    @Published var fiveHour = RollingUsage(limit: 800)
+    @Published var weekly   = RollingUsage(limit: 16400)
     @Published var modelBreakdown: [String: Int] = [:]
     @Published var isLoading: Bool = false
     @Published var lastUpdated: String = "Never refreshed"
 
-    var fiveHourLimit: Int {
-        get { UserDefaults.standard.integer(forKey: "fiveHourLimit").nonZero ?? 225 }
-        set { UserDefaults.standard.set(newValue, forKey: "fiveHourLimit") }
+    // Plan budgets are stored as an estimated compute cost ($) so the bars track
+    // Claude.ai's token-weighted, model-differentiated metering rather than raw turns.
+    // Defaults are calibrated to the Max-5x plan.
+    var fiveHourBudget: Double {
+        get { let v = UserDefaults.standard.double(forKey: "fiveHourBudget"); return v > 0 ? v : 800 }
+        set { UserDefaults.standard.set(newValue, forKey: "fiveHourBudget") }
     }
-    var weeklyLimit: Int {
-        get { UserDefaults.standard.integer(forKey: "weeklyLimit").nonZero ?? 2450 }
-        set { UserDefaults.standard.set(newValue, forKey: "weeklyLimit") }
+    var weeklyBudget: Double {
+        get { let v = UserDefaults.standard.double(forKey: "weeklyBudget"); return v > 0 ? v : 16400 }
+        set { UserDefaults.standard.set(newValue, forKey: "weeklyBudget") }
     }
 
     private var timer: Timer?
@@ -48,7 +52,7 @@ class AnthropicUsageService: ObservableObject {
 
     func refresh() async {
         isLoading = true
-        let limits = (fiveHr: fiveHourLimit, weekly: weeklyLimit)
+        let limits = (fiveHr: fiveHourBudget, weekly: weeklyBudget)
         let r = await Task.detached(priority: .userInitiated) {
             await Self.parse(projectsDir: self.projectsDir, limits: limits)
         }.value
@@ -66,7 +70,7 @@ class AnthropicUsageService: ObservableObject {
 
     private static func parse(
         projectsDir: URL,
-        limits: (fiveHr: Int, weekly: Int)
+        limits: (fiveHr: Double, weekly: Double)
     ) async -> (today: TurnUsage, month: TurnUsage,
                 fiveHour: RollingUsage, weekly: RollingUsage,
                 models: [String: Int]) {
@@ -86,6 +90,8 @@ class AnthropicUsageService: ObservableObject {
         var todayIDs  = Set<String>()
         var monthIDs  = Set<String>()
         var models    = [String: Int]()
+        var fiveHrCost = 0.0   // cost-weighted usage ($) in the 5-hour window
+        var weekCost   = 0.0   // cost-weighted usage ($) since last Thursday
 
         let iso = ISO8601DateFormatter()
         iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -112,37 +118,47 @@ class AnthropicUsageService: ObservableObject {
 
                     let msg = obj["message"] as? [String: Any] ?? [:]
 
-                    // ── Token accounting (assistant API responses) ───────────
-                    if let uRaw = msg["usage"] as? [String: Any], ts >= monthStart {
-                        let inp   = uRaw["input_tokens"]               as? Int ?? 0
-                        let out   = uRaw["output_tokens"]              as? Int ?? 0
-                        let cRead = uRaw["cache_read_input_tokens"]    as? Int ?? 0
-                        let cCr   = uRaw["cache_creation_input_tokens"] as? Int ?? 0
+                    // ── Token & cost accounting (assistant API responses) ────
+                    // Cost-weighted usage drives the 5-hour / weekly bars so they
+                    // track Claude.ai's token-weighted, per-model metering rather
+                    // than raw turn counts.
+                    if let uRaw = msg["usage"] as? [String: Any] {
                         let model = msg["model"] as? String ?? "unknown"
+                        let cost  = tokenCost(model: model, uRaw)
+                        if ts >= fiveHrStart { fiveHrCost += cost }
+                        if ts >= weekStart   { weekCost   += cost }
 
-                        monthAcc.inputTokens       += inp
-                        monthAcc.outputTokens      += out
-                        monthAcc.cacheReadTokens   += cRead
-                        monthAcc.cacheCreateTokens += cCr
-                        models[shortName(model), default: 0] += inp + out
+                        if ts >= monthStart {
+                            let inp   = uRaw["input_tokens"]               as? Int ?? 0
+                            let out   = uRaw["output_tokens"]              as? Int ?? 0
+                            let cRead = uRaw["cache_read_input_tokens"]    as? Int ?? 0
+                            let cCr   = uRaw["cache_creation_input_tokens"] as? Int ?? 0
 
-                        if ts >= todayStart {
-                            todayAcc.inputTokens       += inp
-                            todayAcc.outputTokens      += out
-                            todayAcc.cacheReadTokens   += cRead
-                            todayAcc.cacheCreateTokens += cCr
+                            monthAcc.inputTokens       += inp
+                            monthAcc.outputTokens      += out
+                            monthAcc.cacheReadTokens   += cRead
+                            monthAcc.cacheCreateTokens += cCr
+                            models[shortName(model), default: 0] += inp + out
+
+                            if ts >= todayStart {
+                                todayAcc.inputTokens       += inp
+                                todayAcc.outputTokens      += out
+                                todayAcc.cacheReadTokens   += cRead
+                                todayAcc.cacheCreateTokens += cCr
+                            }
                         }
                     }
 
                     // ── Turn counting: unique user-initiated prompt IDs ───────
                     // Only count "user" entries whose content is a plain string
                     // (tool-result entries have array content and don't count as turns).
+                    // Windows are evaluated independently so the weekly window still
+                    // counts turns that fall before the 1st of the month.
                     if let entryType = obj["type"] as? String,
                        entryType == "user",
                        (msg["content"] as? String) != nil,   // real human text, not tool results
-                       let pid = obj["promptId"] as? String, !pid.isEmpty,
-                       ts >= monthStart {
-                        monthIDs.insert(pid)
+                       let pid = obj["promptId"] as? String, !pid.isEmpty {
+                        if ts >= monthStart  { monthIDs.insert(pid) }
                         if ts >= todayStart  { todayIDs.insert(pid) }
                         if ts >= fiveHrStart { fiveHrIDs.insert(pid) }
                         if ts >= weekStart   { weekIDs.insert(pid) }
@@ -154,8 +170,10 @@ class AnthropicUsageService: ObservableObject {
         todayAcc.turns = todayIDs.count
         monthAcc.turns = monthIDs.count
 
-        var fhr = RollingUsage(limit: limits.fiveHr); fhr.turns = fiveHrIDs.count
-        var wk  = RollingUsage(limit: limits.weekly); wk.turns  = weekIDs.count
+        var fhr = RollingUsage(limit: limits.fiveHr)
+        fhr.used = fiveHrCost; fhr.turns = fiveHrIDs.count
+        var wk  = RollingUsage(limit: limits.weekly)
+        wk.used = weekCost; wk.turns = weekIDs.count
 
         return (todayAcc, monthAcc, fhr, wk, models)
     }
@@ -163,9 +181,23 @@ class AnthropicUsageService: ObservableObject {
     // Last Thursday midnight in current timezone (Claude.ai weekly reset day)
     private static func lastThursday(cal: Calendar, from now: Date) -> Date {
         let todayStart = cal.startOfDay(for: now)
-        let weekday    = cal.component(.weekday, from: todayStart)  // 1=Sun…7=Sat
-        let daysBack   = (weekday + 1) % 7  // 0 on Thu, 1 on Fri, 2 on Sat, 3 on Sun…
+        let weekday    = cal.component(.weekday, from: todayStart)  // 1=Sun…7=Sat (Thu=5)
+        let daysBack   = (weekday + 2) % 7  // 0 on Thu, 1 on Fri, 2 on Sat, 3 on Sun…
         return cal.date(byAdding: .day, value: -daysBack, to: todayStart)!
+    }
+
+    // Estimated compute cost ($) of one API response, using approximate Anthropic
+    // list prices ($/Mtok) as per-model weights: input, output, cache-write, cache-read.
+    private static func tokenCost(model: String, _ u: [String: Any]) -> Double {
+        let pin: Double, pout: Double, pcw: Double, pcr: Double
+        if model.contains("opus")        { pin = 15; pout = 75; pcw = 18.75; pcr = 1.50 }
+        else if model.contains("haiku")  { pin = 1;  pout = 5;  pcw = 1.25;  pcr = 0.10 }
+        else                             { pin = 3;  pout = 15; pcw = 3.75;  pcr = 0.30 } // sonnet / default
+        let inp = Double(u["input_tokens"]                as? Int ?? 0)
+        let out = Double(u["output_tokens"]               as? Int ?? 0)
+        let cw  = Double(u["cache_creation_input_tokens"] as? Int ?? 0)
+        let cr  = Double(u["cache_read_input_tokens"]     as? Int ?? 0)
+        return (inp * pin + out * pout + cw * pcw + cr * pcr) / 1_000_000
     }
 
     private static func shortName(_ m: String) -> String {

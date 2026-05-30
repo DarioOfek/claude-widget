@@ -40,6 +40,13 @@ struct ContentView: View {
                 VStack(spacing: 10) {
                     UsageBar(label: "5-HOUR WINDOW", usage: service.fiveHour)
                     UsageBar(label: "SINCE THURSDAY", usage: service.weekly)
+                    HStack {
+                        Text("estimated · Claude Code only")
+                            .font(.system(size: 8))
+                            .foregroundColor(.white.opacity(0.28))
+                        Spacer()
+                    }
+                    .padding(.horizontal, 12)
                 }
                 .padding(.top, 10)
                 .padding(.bottom, 6)
